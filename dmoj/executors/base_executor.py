@@ -3,20 +3,13 @@ import os
 import re
 import shutil
 import subprocess
-import sys
-import tempfile
 import traceback
+import tempfile
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-from dmoj.cptbox import IsolateTracer, TracedPopen, syscalls
-from dmoj.cptbox.filesystem_policies import ExactDir, ExactFile, FilesystemAccessRule, RecursiveDir
-from dmoj.cptbox.handlers import ALLOW
 from dmoj.error import InternalError
 from dmoj.judgeenv import env, skip_self_test
 from dmoj.result import Result
-from dmoj.utils import setbufsize_path
-from dmoj.utils.ansi import print_ansi
-from dmoj.utils.error import print_protection_fault
 from dmoj.utils.unicode import utf8bytes, utf8text
 
 VersionFlags = Union[str, Tuple[str, ...]]
@@ -29,83 +22,13 @@ AutoConfigOutput = Tuple[Optional[AutoConfigResult], bool, str, str]
 
 version_cache: Dict[str, RuntimeVersionList] = {}
 
-if os.path.isdir('/usr/home'):
-    USR_DIR = [RecursiveDir(f'/usr/{d}') for d in os.listdir('/usr') if d != 'home' and os.path.isdir(f'/usr/{d}')]
-else:
-    USR_DIR = [RecursiveDir('/usr')]
-
-BASE_FILESYSTEM: List[FilesystemAccessRule] = [
-    ExactFile('/dev/null'),
-    ExactFile('/dev/tty'),
-    ExactFile('/dev/zero'),
-    ExactFile('/dev/urandom'),
-    ExactFile('/dev/random'),
-    *USR_DIR,
-    RecursiveDir('/lib'),
-    RecursiveDir('/lib32'),
-    RecursiveDir('/lib64'),
-    RecursiveDir('/opt'),
-    ExactDir('/etc'),
-    ExactFile('/etc/localtime'),
-    ExactFile('/etc/timezone'),
-    ExactDir('/usr'),
-    ExactDir('/tmp'),
-    ExactDir('/'),
-]
-
-BASE_WRITE_FILESYSTEM: List[FilesystemAccessRule] = [ExactFile('/dev/null')]
-
-if 'freebsd' in sys.platform:
-    BASE_FILESYSTEM += [
-        ExactFile('/etc/spwd.db'),
-        ExactFile('/etc/pwd.db'),
-        ExactFile('/dev/hv_tsc'),
-        RecursiveDir('/dev/fd'),
-    ]
-else:
-    BASE_FILESYSTEM += [
-        ExactDir('/sys/devices/system/cpu'),
-        ExactFile('/sys/devices/system/cpu/online'),
-        ExactFile('/etc/selinux/config'),
-        ExactFile('/sys/kernel/mm/transparent_hugepage/enabled'),
-        ExactFile('/sys/kernel/mm/transparent_hugepage/hpage_pmd_size'),
-        ExactFile('/sys/kernel/mm/transparent_hugepage/shmem_enabled'),
-    ]
-
-if sys.platform.startswith('freebsd'):
-    BASE_FILESYSTEM += [ExactFile('/etc/libmap.conf'), ExactFile('/var/run/ld-elf.so.hints')]
-else:
-    # Linux and kFreeBSD mounts linux-style procfs.
-    BASE_FILESYSTEM += [
-        ExactDir('/proc'),
-        ExactDir('/proc/self'),
-        ExactFile('/proc/self/maps'),
-        ExactFile('/proc/self/exe'),
-        ExactFile('/proc/self/auxv'),
-        ExactFile('/proc/meminfo'),
-        ExactFile('/proc/stat'),
-        ExactFile('/proc/cpuinfo'),
-        ExactFile('/proc/filesystems'),
-        ExactDir('/proc/xen'),
-        ExactFile('/proc/uptime'),
-        ExactFile('/proc/sys/vm/overcommit_memory'),
-    ]
-
-    # Linux-style ld.
-    BASE_FILESYSTEM += [ExactFile('/etc/ld.so.nohwcap'), ExactFile('/etc/ld.so.preload'), ExactFile('/etc/ld.so.cache')]
-
 UTF8_LOCALE = 'C.UTF-8'
-
-if sys.platform.startswith('freebsd') and sys.platform < 'freebsd13':
-    UTF8_LOCALE = 'en_US.UTF-8'
-
 
 class ExecutorMeta(type):
     def __new__(mcs, name, bases, attrs) -> Any:
         if '__module__' in attrs:
             attrs['name'] = attrs['__module__'].split('.')[-1]
         return super().__new__(mcs, name, bases, attrs)
-
 
 class BaseExecutor(metaclass=ExecutorMeta):
     ext: str
@@ -120,14 +43,6 @@ class BaseExecutor(metaclass=ExecutorMeta):
     test_memory = env.selftest_memory_limit
     version_regex = re.compile(r'.*?(\d+(?:\.\d+)+)', re.DOTALL)
     source_filename_format = '{problem_id}.{ext}'
-
-    address_grace = 65536
-    data_grace = 0
-    fsize = 0
-    personality = 0x0040000  # ADDR_NO_RANDOMIZE
-    fs: List[FilesystemAccessRule] = []
-    write_fs: List[FilesystemAccessRule] = []
-    syscalls: List[Union[str, Tuple[str, Any]]] = []
 
     _dir: Optional[str] = None
 
@@ -154,16 +69,11 @@ class BaseExecutor(metaclass=ExecutorMeta):
 
     def cleanup(self) -> None:
         if not hasattr(self, '_dir'):
-            # We are really toasted, as constructor failed.
             print('BaseExecutor error: not initialized?')
             return
-
-        # _dir may be None if an exception (e.g. CompileError) was raised during
-        # create_files, e.g. by executors that perform source validation like
-        # Java or Go.
         if self._dir:
             try:
-                shutil.rmtree(self._dir)  # delete directory
+                shutil.rmtree(self._dir)
             except OSError as exc:
                 if exc.errno != errno.ENOENT:
                     raise
@@ -175,8 +85,6 @@ class BaseExecutor(metaclass=ExecutorMeta):
         self.cleanup()
 
     def _file(self, *paths: str) -> str:
-        # Defer creation of temporary submission directory until first file is created,
-        # because we may not need one (e.g. for cached executors).
         if self._dir is None:
             self._dir = tempfile.mkdtemp(dir=self._tempdir)
         return os.path.join(self._dir, *paths)
@@ -194,130 +102,68 @@ class BaseExecutor(metaclass=ExecutorMeta):
     def get_nproc(self) -> int:
         return self.nproc
 
-    def populate_result(self, stderr: bytes, result: Result, process: TracedPopen) -> None:
-        # Translate status codes/process results into Result object for status codes
-        result.max_memory = process.max_memory or 0
-        result.execution_time = process.execution_time or 0.0
-        result.wall_clock_time = process.wall_clock_time or 0.0
-        result.context_switches = process.context_switches or (0, 0)
+    def populate_result(self, stderr: bytes, result: Result, process: subprocess.Popen) -> None:
+        # Không có thông tin chi tiết như max_memory, context_switches từ cptbox, chỉ lấy thời gian và trạng thái cơ bản
+        result.execution_time = process.execution_time if hasattr(process, 'execution_time') else 0.0
+        result.max_memory = 0  # Không thể đo bộ nhớ chính xác mà không có cptbox
+        result.wall_clock_time = 0  # Không đo wall time
+        result.context_switches = (0, 0)  # Không đo context switches
         result.runtime_version = ', '.join(
             f'{runtime} {".".join(map(str, version))}' for runtime, version in self.get_runtime_versions()
         )
 
-        if process.is_ir:
-            result.result_flag |= Result.IR
-        if process.is_rte:
+        # Xử lý trạng thái dựa trên returncode và timeout
+        if process.returncode != 0:
             result.result_flag |= Result.RTE
-        if process.is_ole:
-            result.result_flag |= Result.OLE
-        if process.is_tle:
+        if hasattr(process, 'is_tle') and process.is_tle:
             result.result_flag |= Result.TLE
-        if process.is_mle:
-            result.result_flag |= Result.MLE
 
-        result.update_feedback(stderr, process, self)
-
-    def parse_feedback_from_stderr(self, stderr: bytes, process: TracedPopen) -> str:
+    def parse_feedback_from_stderr(self, stderr: bytes, process: subprocess.Popen) -> str:
         return ''
-
-    def _add_syscalls(self, sec: IsolateTracer, handlers: List[Union[str, Tuple[str, Any]]]) -> IsolateTracer:
-        for item in handlers:
-            if isinstance(item, tuple):
-                name, handler = item
-            else:
-                name = item
-                handler = ALLOW
-            sec[getattr(syscalls, f'sys_{name}')] = handler
-        return sec
-
-    def get_security(self, launch_kwargs=None, extra_fs=None) -> IsolateTracer:
-        read_fs = self.get_fs()
-        if extra_fs:
-            read_fs += extra_fs
-        sec = IsolateTracer(read_fs=read_fs, write_fs=self.get_write_fs())
-        return self._add_syscalls(sec, self.get_allowed_syscalls())
-
-    def get_fs(self) -> List[FilesystemAccessRule]:
-        assert self._dir is not None
-        return BASE_FILESYSTEM + self.fs + self._load_extra_fs() + [RecursiveDir(self._dir)]
-
-    def _load_extra_fs(self) -> List[FilesystemAccessRule]:
-        name = self.get_executor_name()
-        extra_fs_config = env.get('extra_fs', {}).get(name, [])
-        extra_fs = []
-        constructors: Dict[str, Type[FilesystemAccessRule]] = dict(
-            exact_file=ExactFile, exact_dir=ExactDir, recursive_dir=RecursiveDir
-        )
-        for rules in extra_fs_config:
-            for type, path in rules.iteritems():
-                constructor = constructors.get(type)
-                assert constructor, f"Can't load rule for extra path with rule type {type}"
-                extra_fs.append(constructor(path))
-
-        return extra_fs
-
-    def get_write_fs(self) -> List[FilesystemAccessRule]:
-        return BASE_WRITE_FILESYSTEM + self.write_fs
-
-    def get_allowed_syscalls(self) -> List[Union[str, Tuple[str, Any]]]:
-        return self.syscalls
-
-    def get_address_grace(self) -> int:
-        return self.address_grace
 
     def get_env(self) -> Dict[str, str]:
         env = {'LANG': UTF8_LOCALE}
         if self.unbuffered:
-            env['CPTBOX_STDOUT_BUFFER_SIZE'] = '0'
+            env['PYTHONUNBUFFERED'] = '1'  # Chỉ áp dụng cho Python nếu cần, không dùng CPTBOX_STDOUT_BUFFER_SIZE
         return env
 
-    def launch(self, *args, **kwargs) -> TracedPopen:
+    def launch(self, *args, **kwargs) -> subprocess.Popen:
         assert self._dir is not None
         for src, dst in kwargs.get('symlinks', {}).items():
             src = os.path.abspath(os.path.join(self._dir, src))
-            # Disallow the creation of symlinks outside the submission directory.
             if os.path.commonprefix([src, self._dir]) == self._dir:
-                # If a link already exists under this name, it's probably from a
-                # previous case, but might point to something different.
                 if os.path.islink(src):
                     os.unlink(src)
                 os.symlink(dst, src)
             else:
                 raise InternalError('cannot symlink outside of submission directory')
 
-        agent = self._file('setbufsize.so')
-        shutil.copyfile(setbufsize_path, agent)
-        child_env = {
-            # Forward LD_LIBRARY_PATH for systems (e.g. Android Termux) that require
-            # it to find shared libraries
-            'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', ''),
-            'LD_PRELOAD': agent,
-            'CPTBOX_STDOUT_BUFFER_SIZE': kwargs.get('stdout_buffer_size'),
-            'CPTBOX_STDERR_BUFFER_SIZE': kwargs.get('stderr_buffer_size'),
-        }
-        child_env.update(self.get_env())
-
+        child_env = self.get_env()
         executable = self.get_executable()
         assert executable is not None
-        return TracedPopen(
-            [utf8bytes(a) for a in self.get_cmdline(**kwargs) + list(args)],
+        cmdline = [utf8bytes(a) for a in self.get_cmdline(**kwargs) + list(args)]
+        
+        # Sử dụng subprocess.Popen thay vì TracedPopen
+        process = subprocess.Popen(
+            cmdline,
             executable=utf8bytes(executable),
-            security=self.get_security(launch_kwargs=kwargs, extra_fs=kwargs.get('extra_fs')),
-            address_grace=self.get_address_grace(),
-            data_grace=self.data_grace,
-            personality=self.personality,
-            time=kwargs.get('time', 0),
-            memory=kwargs.get('memory', 0),
-            wall_time=kwargs.get('wall_time'),
-            stdin=kwargs.get('stdin'),
-            stdout=kwargs.get('stdout'),
-            stderr=kwargs.get('stderr'),
+            stdin=kwargs.get('stdin', subprocess.PIPE),
+            stdout=kwargs.get('stdout', subprocess.PIPE),
+            stderr=kwargs.get('stderr', subprocess.PIPE),
             env=child_env,
             cwd=utf8bytes(self._dir),
-            nproc=self.get_nproc(),
-            fsize=self.fsize,
-            cpu_affinity=env.submission_cpu_affinity,
         )
+        
+            # Gắn thuộc tính is_tle nếu có timeout
+        wall_time = kwargs.get('wall_time', kwargs.get('time', None))
+        if wall_time:
+            process.is_tle = False
+            try:
+                process.communicate(timeout=wall_time)
+            except subprocess.TimeoutExpired:
+                process.is_tle = True
+                process.kill()
+        return process
 
     @classmethod
     def get_command(cls) -> Optional[str]:
@@ -338,7 +184,7 @@ class BaseExecutor(metaclass=ExecutorMeta):
             return True
 
         if output:
-            print_ansi(f'Self-testing #ansi[{cls.get_executor_name()}](|underline):'.ljust(39), end=' ')
+            print(f'Self-testing {cls.get_executor_name()}:'.ljust(39), end=' ')
         try:
             executor = cls(cls.test_name, utf8bytes(cls.test_program))
             proc = executor.launch(
@@ -346,42 +192,24 @@ class BaseExecutor(metaclass=ExecutorMeta):
             )
 
             test_message = b'echo: Hello, World!'
-            stdout, stderr = proc.communicate(test_message + b'\n')
-
-            if proc.is_tle:
-                print_ansi('#ansi[Time Limit Exceeded](red|bold)')
-                return False
-            if proc.is_mle:
-                print_ansi('#ansi[Memory Limit Exceeded](red|bold)')
-                return False
+            stdout, stderr = proc.communicate(test_message + b'\n', timeout=cls.test_time)
 
             res = stdout.strip() == test_message and not stderr
             if output:
-                # Cache the versions now, so that the handshake packet doesn't take ages to generate
                 cls.get_runtime_versions()
-                usage = f'[{proc.execution_time:.3f}s, {proc.max_memory} KB]'
-                print_ansi(f'{["#ansi[Failed](red|bold) ", "#ansi[Success](green|bold)"][res]} {usage:<19}', end=' ')
-                print_ansi(
-                    ', '.join(
-                        [
-                            f'#ansi[{runtime}](cyan|bold) {".".join(map(str, version))}'
-                            for runtime, version in cls.get_runtime_versions()
-                        ]
-                    )
-                )
+                usage = f'[{proc.execution_time:.3f}s, 0 KB]'  # Không đo được bộ nhớ
+                print(f'{["Failed ", "Success"][res]} {usage:<19}', end=' ')
+                print(', '.join(
+                    [f'{runtime} {".".join(map(str, version))}' for runtime, version in cls.get_runtime_versions()]
+                ))
             if stdout.strip() != test_message and error_callback:
                 error_callback('Got unexpected stdout output:\n' + utf8text(stdout))
-            if stderr:
-                if error_callback:
-                    error_callback('Got unexpected stderr output:\n' + utf8text(stderr))
-                else:
-                    print(stderr, file=sys.stderr)
-            if proc.protection_fault:
-                print_protection_fault(proc.protection_fault)
+            if stderr and error_callback:
+                error_callback('Got unexpected stderr output:\n' + utf8text(stderr))
             return res
-        except Exception:
+        except Exception as e:
             if output:
-                print_ansi('#ansi[Failed](red|bold)')
+                print('Failed')
                 traceback.print_exc()
             if error_callback:
                 error_callback(traceback.format_exc())
@@ -403,7 +231,6 @@ class BaseExecutor(metaclass=ExecutorMeta):
         versions: RuntimeVersionList = []
         for runtime, path in cls.get_versionable_commands():
             flags = cls.get_version_flags(runtime)
-
             version = None
             for flag in flags:
                 try:
@@ -420,7 +247,6 @@ class BaseExecutor(metaclass=ExecutorMeta):
                     if version:
                         break
             versions.append((runtime, version or ()))
-
         version_cache[key] = versions
         return version_cache[key]
 
@@ -452,7 +278,6 @@ class BaseExecutor(metaclass=ExecutorMeta):
         if mapping is None:
             return {}, False, 'Unimplemented', ''
         result = {}
-
         for key, files in mapping.items():
             file = cls.find_command_from_list(files)
             if file is None:
@@ -467,9 +292,7 @@ class BaseExecutor(metaclass=ExecutorMeta):
         errors: List[str] = []
         success = executor.run_self_test(output=False, error_callback=errors.append)
         if success:
-            message = ''
-            if len(result) == 1:
-                message = f'Using {list(result.values())[0]}'
+            message = f'Using {list(result.values())[0]}' if len(result) == 1 else ''
         else:
             message = 'Failed self-test'
         return result, success, message, '\n'.join(errors)

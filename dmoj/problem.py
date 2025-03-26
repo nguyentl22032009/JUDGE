@@ -43,6 +43,7 @@ class MemoryIO:
         self.buffer = bytearray()
         self.sealed = seal
         self.pos = 0
+        self._temp_file = None
 
     def write(self, data):
         if not self.sealed:
@@ -61,10 +62,20 @@ class MemoryIO:
 
     def seal(self):
         self.sealed = True
-
+    def to_path(self):
+        import tempfile
+        if self._temp_file is None:
+            # Tạo file tạm và ghi dữ liệu từ buffer
+            with tempfile.NamedTemporaryFile(delete=False) as temp:
+                temp.write(self.to_bytes())
+                self._temp_file = temp.name
+        return self._temp_file
     def close(self):
         self.buffer = bytearray()
         self.sealed = True
+        if self._temp_file and os.path.exists(self._temp_file):
+            os.remove(self._temp_file)
+            self._temp_file = None
 
 DEFAULT_TEST_CASE_INPUT_PATTERN = r'^(?=.*?\.in|in).*?(?:(?:^|\W)(?P<batch>\d+)[^\d\s]+)?(?P<case>\d+)[^\d\s]*$'
 DEFAULT_TEST_CASE_OUTPUT_PATTERN = r'^(?=.*?\.out|out).*?(?:(?:^|\W)(?P<batch>\d+)[^\d\s]+)?(?P<case>\d+)[^\d\s]*$'

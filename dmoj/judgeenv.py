@@ -1,7 +1,7 @@
 import glob
 import os
 from operator import itemgetter
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Set
 
 import yaml
 
@@ -29,7 +29,9 @@ env: ConfigNode = ConfigNode(
     },
     dynamic=False,
 )
-
+exclude_executors: Set[str] = set()  # Tập hợp các executor bị loại trừ
+only_executors: Set[str] = set()  
+skip_self_test = None 
 _root: str = os.path.dirname(__file__)
 
 _problem_root_cache: Dict[str, str] = {}

@@ -1,9 +1,9 @@
 import os
 import re
+import subprocess
 from collections import deque
 from typing import Dict, List, Optional, Type
 
-from dmoj.cptbox import TracedPopen
 from dmoj.executors.base_executor import AutoConfigOutput, AutoConfigResult, VersionFlags
 from dmoj.executors.compiled_executor import CompiledExecutor
 from dmoj.executors.mixins import SingleDigitVersionMixin
@@ -20,7 +20,6 @@ CLANG_VERSIONS: List[str] = ['3.9', '3.8', '3.7', '3.6', '3.5']
 
 recppexc = re.compile(br"terminate called after throwing an instance of \'([A-Za-z0-9_:]+)\'\r?$", re.M)
 
-
 class CLikeExecutor(SingleDigitVersionMixin, CompiledExecutor):
     defines: List[str] = []
     flags: List[str] = []
@@ -35,7 +34,6 @@ class CLikeExecutor(SingleDigitVersionMixin, CompiledExecutor):
         if source_code:
             self.source_dict[problem_id + self.ext] = source_code
         self.defines = kwargs.pop('defines', [])
-
         super().__init__(problem_id, source_code, **kwargs)
 
     def create_files(self, problem_id: str, source_code: bytes, *args, **kwargs) -> None:
@@ -86,16 +84,13 @@ class CLikeExecutor(SingleDigitVersionMixin, CompiledExecutor):
         env.update(GCC_ENV)
         return env
 
-    def parse_feedback_from_stderr(self, stderr: bytes, process: TracedPopen) -> str:
+    def parse_feedback_from_stderr(self, stderr: bytes, process: subprocess.Popen) -> str:
         if not stderr or len(stderr) > 2048:
             return ''
         match = deque(recppexc.finditer(stderr), maxlen=1)
         if not match:
             return ''
         exception = match[0].group(1)
-        # We call `demangle` because if the child process exits by running out of memory,
-        # __cxa_demangle will fail to allocate memory to demangle the name, resulting in errors
-        # like `St9bad_alloc`, the mangled form of the name.
         return '' if len(exception) > 40 else utf8text(demangle(exception), 'replace')
 
     @classmethod
@@ -103,15 +98,10 @@ class CLikeExecutor(SingleDigitVersionMixin, CompiledExecutor):
         conf_arch = cls.runtime_dict.get(cls.arch, 'native')
         if conf_arch:
             return f'-march={conf_arch}'
-        # arch must've been explicitly disabled
         return ''
 
     @classmethod
     def autoconfig_run_test(cls, result: AutoConfigResult) -> AutoConfigOutput:
-        # Some versions of GCC/Clang (like those in Raspbian or ARM64 Debian)
-        # can't autodetect the CPU, in which case our unconditional passing of
-        # -march=native breaks. Here we try to see if -march=native works, and
-        # if not fall back to a generic (slow) build.
         for target in ['native', None]:
             result[cls.arch] = target
             executor: Type[CLikeExecutor] = type('Executor', (cls,), {'runtime_dict': result})
@@ -121,7 +111,6 @@ class CLikeExecutor(SingleDigitVersionMixin, CompiledExecutor):
             if success:
                 assert cls.command is not None
                 message = f'Using {result[cls.command]} ({target or "generic"} target)'
-                # Don't pollute the YAML in the default case
                 if target == 'native':
                     del result[cls.arch]
                 return result, success, message, ''
@@ -139,7 +128,6 @@ class CLikeExecutor(SingleDigitVersionMixin, CompiledExecutor):
             cls.has_color = versions is not None and versions[0][1] is not None and versions[0][1] > (4, 9)
         return res
 
-
 class GCCMixin(CLikeExecutor):
     arch: str = 'gcc_target_arch'
 
@@ -149,7 +137,6 @@ class GCCMixin(CLikeExecutor):
     @classmethod
     def get_version_flags(cls, command: str) -> List[VersionFlags]:
         return ['-dumpversion']
-
 
 class ClangMixin(CLikeExecutor):
     arch: str = 'clang_target_arch'
@@ -161,10 +148,8 @@ class ClangMixin(CLikeExecutor):
     def get_version_flags(cls, command: str) -> List[VersionFlags]:
         return ['--version']
 
-
 class CExecutor(CLikeExecutor):
     ext: str = 'c'
-
 
 class CPPExecutor(CLikeExecutor):
     ext: str = 'cpp'

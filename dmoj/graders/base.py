@@ -1,6 +1,6 @@
+import subprocess
 from typing import Optional, TYPE_CHECKING
 
-from dmoj.cptbox import TracedPopen
 from dmoj.executors.base_executor import BaseExecutor
 from dmoj.problem import Problem, TestCase
 from dmoj.result import Result
@@ -9,14 +9,13 @@ from dmoj.utils.unicode import utf8bytes
 if TYPE_CHECKING:
     from dmoj.judge import JudgeWorker
 
-
 class BaseGrader:
     source: bytes
     language: str
     problem: Problem
     judge: 'JudgeWorker'
     binary: BaseExecutor
-    _current_proc: Optional[TracedPopen]
+    _current_proc: Optional[subprocess.Popen]
 
     def __init__(self, judge: 'JudgeWorker', problem: Problem, language: str, source: bytes) -> None:
         self.source = utf8bytes(source)
